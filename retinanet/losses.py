@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import pdb
 
 def calc_iou(a, b):
     area = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
@@ -22,7 +23,9 @@ def calc_iou(a, b):
     return IoU
 
 class FocalLoss(nn.Module):
-    #def __init__(self):
+    # def __init__(self, positive_threshold=0.5, negative_threshold=0.4):
+    #     self.positive_threshold = positive_threshold
+    #     self.negative_threshold = negative_threshold
 
     def forward(self, classifications, regressions, anchors, annotations):
         alpha = 0.25
@@ -71,12 +74,23 @@ class FocalLoss(nn.Module):
             if torch.cuda.is_available():
                 targets = targets.cuda()
 
-            targets[torch.lt(IoU_max, 0.4), :] = 0
-
-            positive_indices = torch.ge(IoU_max, 0.5)
+            # targets[torch.lt(IoU_max, self.negative_threshold), :] = 0
+            # positive_indices = torch.ge(IoU_max, self.positive_threshold)
+            targets[torch.lt(IoU_max, 0.35), :] = 0
+            positive_indices = torch.ge(IoU_max, 0.45)
 
             num_positive_anchors = positive_indices.sum()
 
+            if num_positive_anchors == 0 and len(bbox_annotation) > 0:
+                print('---------------------------------------------')
+                print('Null Detection : {:>4}/{:>4}'.format(num_positive_anchors.item(), len(bbox_annotation)))
+                # print(bbox_annotation)
+                print(torch.stack(((bbox_annotation[:,2] - bbox_annotation[:,0]), 
+                                   (bbox_annotation[:,3] - bbox_annotation[:,1]),
+                                    bbox_annotation[:,4])).T)
+                print('---------------------------------------------')
+                # pdb.set_trace()
+        
             assigned_annotations = bbox_annotation[IoU_argmax, :]
 
             targets[positive_indices, :] = 0

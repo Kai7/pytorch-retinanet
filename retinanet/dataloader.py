@@ -11,6 +11,10 @@ from torchvision import transforms, utils
 from torch.utils.data.sampler import Sampler
 
 from pycocotools.coco import COCO
+if __name__ == '__main__':
+    from pyflirtools import FLIR
+else:
+    from retinanet.pyflirtools import FLIR
 
 import skimage.io
 import skimage.transform
@@ -72,7 +76,8 @@ class CocoDataset(Dataset):
 
     def load_image(self, image_index):
         image_info = self.coco.loadImgs(self.image_ids[image_index])[0]
-        path       = os.path.join(self.root_dir, 'images', self.set_name, image_info['file_name'])
+        # path       = os.path.join(self.root_dir, 'images', self.set_name, image_info['file_name'])
+        path       = os.path.join(self.root_dir, self.set_name, image_info['file_name'])
         img = skimage.io.imread(path)
 
         if len(img.shape) == 2:
@@ -122,6 +127,121 @@ class CocoDataset(Dataset):
     def num_classes(self):
         return 80
 
+class FLIRDataset(Dataset):
+    """FLIR dataset."""
+
+    def __init__(self, root_dir, set_name='train', transform=None):
+        """
+        Args:
+            root_dir (string): FLIR directory.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        self.root_dir = root_dir
+        self.set_name = set_name
+        self.transform = transform
+
+        self.flir = FLIR(os.path.join(self.root_dir, self.set_name , 'thermal_annotations.json'))
+        print('annotation_file: ', os.path.join(self.root_dir, self.set_name , 'thermal_annotations.json'))
+        self.image_ids = self.flir.getImgIds()
+
+        self.load_classes()
+
+    def load_classes(self):
+        # load class names (name -> label)
+        categories = self.flir.loadCats(self.flir.getCatIds())
+        categories.sort(key=lambda x: x['id'])
+
+        self.classes = {}
+        self.flir_labels = {}
+        self.flir_labels_inverse = {}
+        for c in categories:
+            self.flir_labels[len(self.classes)] = c['id']
+            self.flir_labels_inverse[c['id']] = len(self.classes)
+            self.classes[c['name']] = len(self.classes)
+
+        # also load the reverse (label -> name)
+        self.labels = {}
+        for key, value in self.classes.items():
+            self.labels[value] = key
+
+    def __len__(self):
+        return len(self.image_ids)
+
+    def __getitem__(self, idx):
+        img = self.load_image(idx)
+        annot = self.load_annotations(idx)
+        # print('image')
+        # print(img)
+        # print('annotation')
+        # print(annot)
+        sample = {'img': img, 'annot': annot}
+        if self.transform:
+            sample = self.transform(sample)
+        return sample
+
+    def load_image(self, image_index):
+        image_info = self.flir.loadImgs(self.image_ids[image_index])[0]
+        path = os.path.join(self.root_dir, self.set_name, image_info['file_name'])
+        # img = cv2.imread(path)
+        # path = os.path.join(self.root_dir, 'images',
+        #                     self.set_name, image_info['file_name'])
+        # print('File Name:', image_info['file_name'])
+        # print('Path:', path)
+        # if len(img.shape) == 2:
+        #     img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = skimage.io.imread(path)
+
+        if len(img.shape) == 2:
+            img = skimage.color.gray2rgb(img)
+
+        return img.astype(np.float32)/255.0
+
+
+    def load_annotations(self, image_index):
+        # get ground truth annotations
+        annotations_ids = self.flir.getAnnIds(
+            imgIds=self.image_ids[image_index], iscrowd=False)
+        annotations = np.zeros((0, 5))
+
+        # some images appear to miss annotations (like image with id 257034)
+        if len(annotations_ids) == 0:
+            return annotations
+
+        # parse annotations
+        flir_annotations = self.flir.loadAnns(annotations_ids)
+        for idx, a in enumerate(flir_annotations):
+            if a['category_id'] > 2:
+                continue
+
+            # some annotations have basically no width / height, skip them
+            if a['bbox'][2] < 1 or a['bbox'][3] < 1:
+                continue
+
+            annotation = np.zeros((1, 5))
+            annotation[0, :4] = a['bbox']
+            annotation[0, 4] = self.flir_label_to_label(a['category_id'])
+            annotations = np.append(annotations, annotation, axis=0)
+
+        # transform from [x, y, w, h] to [x1, y1, x2, y2]
+        annotations[:, 2] = annotations[:, 0] + annotations[:, 2]
+        annotations[:, 3] = annotations[:, 1] + annotations[:, 3]
+
+        return annotations
+
+    def flir_label_to_label(self, flir_label):
+        return self.flir_labels_inverse[flir_label]
+
+    def label_to_flir_label(self, label):
+        return self.flir_labels[label]
+
+    def image_aspect_ratio(self, image_index):
+        image = self.flir.loadImgs(self.image_ids[image_index])[0]
+        return float(image['width']) / float(image['height'])
+
+    def num_classes(self):
+        return 3
 
 class CSVDataset(Dataset):
     """CSV dataset."""
@@ -340,23 +460,28 @@ def collater(data):
 
 class Resizer(object):
     """Convert ndarrays in sample to Tensors."""
+    def __init__(self, min_side=608, max_side=1024, **kwargs):
+        self.min_side = min_side
+        self.max_side = max_side
 
-    def __call__(self, sample, min_side=608, max_side=1024):
+        if 'logger' in kwargs:
+            kwargs['logger'].info('Resizer.Min_Side   : {}'.format(self.min_side))
+            kwargs['logger'].info('Resizer.Max_Side   : {}'.format(self.max_side))
+
+    def __call__(self, sample):
         image, annots = sample['img'], sample['annot']
-
         rows, cols, cns = image.shape
-
         smallest_side = min(rows, cols)
 
         # rescale the image so the smallest side is min_side
-        scale = min_side / smallest_side
+        scale = self.min_side / smallest_side
 
         # check if the largest side is now greater than max_side, which can happen
         # when images have a large aspect ratio
         largest_side = max(rows, cols)
 
-        if largest_side * scale > max_side:
-            scale = max_side / largest_side
+        if largest_side * scale > self.max_side:
+            scale = self.max_side / largest_side
 
         # resize the image with the computed scale
         image = skimage.transform.resize(image, (int(round(rows*scale)), int(round((cols*scale)))))
@@ -367,10 +492,38 @@ class Resizer(object):
 
         new_image = np.zeros((rows + pad_w, cols + pad_h, cns)).astype(np.float32)
         new_image[:rows, :cols, :] = image.astype(np.float32)
+        # print(new_image.shape)
 
         annots[:, :4] *= scale
 
         return {'img': torch.from_numpy(new_image), 'annot': torch.from_numpy(annots), 'scale': scale}
+
+# class Resizer(object):
+#     """Convert ndarrays in sample to Tensors."""
+#     def __init__(self, size):
+#         self.size = size
+
+#     # def __call__(self, sample, common_size=512):
+#     def __call__(self, sample):
+#         common_size = self.size
+#         image, annots = sample['img'], sample['annot']
+#         height, width, _ = image.shape
+#         if height > width:
+#             scale = common_size / height
+#             resized_height = common_size
+#             resized_width = int(width * scale)
+#         else:
+#             scale = common_size / width
+#             resized_height = int(height * scale)
+#             resized_width = common_size
+
+#         image = cv2.resize(image, (resized_width, resized_height))
+
+#         new_image = np.zeros((common_size, common_size, 3))
+#         new_image[0:resized_height, 0:resized_width] = image
+#         annots[:, :4] *= scale
+
+#         return {'img': torch.from_numpy(new_image), 'annot': torch.from_numpy(annots), 'scale': scale}
 
 
 class Augmenter(object):

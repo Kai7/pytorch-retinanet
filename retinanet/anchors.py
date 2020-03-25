@@ -2,21 +2,38 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import pdb
+# import logging
 
 class Anchors(nn.Module):
-    def __init__(self, pyramid_levels=None, strides=None, sizes=None, ratios=None, scales=None):
+    def __init__(self, pyramid_levels=None, strides=None, sizes=None, ratios=None, scales=None, **kwargs):
         super(Anchors, self).__init__()
 
-        if pyramid_levels is None:
-            self.pyramid_levels = [3, 4, 5, 6, 7]
-        if strides is None:
-            self.strides = [2 ** x for x in self.pyramid_levels]
-        if sizes is None:
-            self.sizes = [2 ** (x + 2) for x in self.pyramid_levels]
-        if ratios is None:
-            self.ratios = np.array([0.5, 1, 2])
-        if scales is None:
-            self.scales = np.array([2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)])
+        self.pyramid_levels = [3, 4, 5, 6, 7] if pyramid_levels is None else pyramid_levels
+        self.strides = [2 ** x for x in self.pyramid_levels] if strides is None else strides
+        self.sizes   = [2 ** (x + 2) for x in self.pyramid_levels] if sizes is None else sizes
+        self.ratios  = np.array([0.5, 1, 2]) if ratios is None else np.array(ratios)
+        self.scales = np.array([2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)]) if scales is None else np.array(scales)
+        # if pyramid_levels is None:
+        #     self.pyramid_levels = [3, 4, 5, 6, 7]
+        # if strides is None:
+        #     self.strides = [2 ** x for x in self.pyramid_levels]
+        # if sizes is None:
+        #     self.sizes = [2 ** (x + 2) for x in self.pyramid_levels]
+        # if ratios is None:
+        #     self.ratios = np.array([0.5, 1, 2])
+        # if scales is None:
+        #     self.scales = np.array([2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)])
+
+        # print('Anchors Sizes =', self.sizes)
+        if 'logger' in kwargs:
+            kwargs['logger'].info('Anchors Sizes   : {}'.format(str(self.sizes)))
+            kwargs['logger'].info('Anchors Scales  : {}'.format(str(self.scales)))
+            kwargs['logger'].info('Anchors Ratios  : {}'.format(str(self.ratios)))
+            for idx in range(len(self.sizes)):
+                anchors = generate_anchors(base_size=self.sizes[idx], ratios=self.ratios, scales=self.scales, get_sample=True)
+                kwargs['logger'].info('Anchors [{idx}]\n{anchors}'.format(idx=idx, anchors=str(anchors)))
+                
 
     def forward(self, image):
         
@@ -39,7 +56,7 @@ class Anchors(nn.Module):
         else:
             return torch.from_numpy(all_anchors.astype(np.float32))
 
-def generate_anchors(base_size=16, ratios=None, scales=None):
+def generate_anchors(base_size=16, ratios=None, scales=None, get_sample=False):
     """
     Generate anchor (reference) windows by enumerating aspect ratios X
     scales w.r.t. a reference window.
@@ -66,6 +83,10 @@ def generate_anchors(base_size=16, ratios=None, scales=None):
     anchors[:, 2] = np.sqrt(areas / np.repeat(ratios, len(scales)))
     anchors[:, 3] = anchors[:, 2] * np.repeat(ratios, len(scales))
 
+    if get_sample:
+        return anchors
+    
+    # pdb.set_trace()
     # transform from (x_ctr, y_ctr, w, h) -> (x1, y1, x2, y2)
     anchors[:, 0::2] -= np.tile(anchors[:, 2] * 0.5, (2, 1)).T
     anchors[:, 1::2] -= np.tile(anchors[:, 3] * 0.5, (2, 1)).T

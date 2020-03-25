@@ -154,7 +154,7 @@ class ClassificationModel(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, num_classes, block, layers):
+    def __init__(self, num_classes, block, layers, iou_threshold=0.5, **kwargs):
         self.inplanes = 64
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
@@ -165,6 +165,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        self.iou_threshold = iou_threshold
 
         if block == BasicBlock:
             fpn_sizes = [self.layer2[layers[1] - 1].conv2.out_channels, self.layer3[layers[2] - 1].conv2.out_channels,
@@ -180,12 +181,24 @@ class ResNet(nn.Module):
         self.regressionModel = RegressionModel(256)
         self.classificationModel = ClassificationModel(256, num_classes=num_classes)
 
-        self.anchors = Anchors()
+        my_pyramid_levels = [3, 4, 5, 6, 7]
+        # my_sizes   = [int(2 ** (x + 1) * 1.25) for x in my_pyramid_levels]
+        my_sizes   = [int(2 ** (x + 1)) for x in my_pyramid_levels]
+        my_ratios  = [0.45, 1, 3]
+        self.anchors = Anchors(pyramid_levels=my_pyramid_levels,
+                               sizes=my_sizes,
+                               ratios=my_ratios,
+                               **kwargs)
+        # self.anchors = Anchors()
 
         self.regressBoxes = BBoxTransform()
 
         self.clipBoxes = ClipBoxes()
 
+        # my_positive_threshold = 0.45
+        # my_negative_threshold = 0.35
+        # self.focalLoss = losses.FocalLoss(positive_threshold=my_positive_threshold, 
+        #                                   negative_threshold=my_negative_threshold)
         self.focalLoss = losses.FocalLoss()
 
         for m in self.modules():
@@ -264,8 +277,10 @@ class ResNet(nn.Module):
             scores_over_thresh = (scores > 0.05)[0, :, 0]
 
             if scores_over_thresh.sum() == 0:
+                print('No boxes to NMS')
                 # no boxes to NMS, just return
-                return [torch.zeros(0), torch.zeros(0), torch.zeros(0, 4)]
+                # return [torch.zeros(0), torch.zeros(0), torch.zeros(0, 4)]
+                return [torch.zeros([1]).cuda(0), torch.zeros([1]).cuda(0), torch.zeros([1, 4]).cuda(0)]
 
             classification = classification[:, scores_over_thresh, :]
             transformed_anchors = transformed_anchors[:, scores_over_thresh, :]
